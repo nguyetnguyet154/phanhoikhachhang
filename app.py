@@ -2,26 +2,20 @@ import streamlit as st
 import pandas as pd
 import pymysql
 from datetime import datetime
+import re
+import io
+
 
 # =========================================================
-# CẤU HÌNH
+# CẤU HÌNH TRANG
 # =========================================================
 
 st.set_page_config(
-    page_title="Customer Complaint Radar",
+    page_title="CUSTOMER COMPLAINT RADAR",
     page_icon="🚨",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-
-# =========================================================
-# MYSQL AIVEN
-# =========================================================
-
-MYSQL_HOST = "mysql-29a6db25-tranthikimnguyet8-df0c.i.aivencloud.com"
-MYSQL_PORT = 19586
-MYSQL_USER = "avnadmin"
-MYSQL_PASSWORD = "AVNS_6y8qIYGcoOj22F0rJKB"
-MYSQL_DATABASE = "defaultdb"
 
 
 # =========================================================
@@ -31,48 +25,81 @@ MYSQL_DATABASE = "defaultdb"
 st.markdown("""
 <style>
 
-.main {
-    background-color: #f7f9fc;
+.main-title {
+    font-size: 36px;
+    font-weight: 800;
+    color: #0f4c5c;
+    margin-bottom: 5px;
 }
 
-.block-container {
-    padding-top: 1.5rem;
-}
-
-.header-box {
-    background: linear-gradient(135deg, #0f4c81, #1976d2);
-    padding: 28px;
-    border-radius: 15px;
-    color: white;
+.subtitle {
+    font-size: 17px;
+    color: #666;
     margin-bottom: 25px;
 }
 
-.header-title {
-    font-size: 32px;
-    font-weight: bold;
-}
-
-.header-subtitle {
-    font-size: 16px;
-    margin-top: 8px;
-}
-
-.metric-card {
-    background: white;
+.card {
+    background-color: #ffffff;
     padding: 20px;
-    border-radius: 15px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    margin-bottom: 15px;
+}
+
+.metric-box {
+    background-color: #ffffff;
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
     text-align: center;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
 }
 
 .metric-number {
     font-size: 30px;
     font-weight: bold;
-    color: #0f4c81;
+    color: #0f4c5c;
 }
 
 .metric-label {
     color: #666;
+    font-size: 14px;
+}
+
+.alert-critical {
+    background-color: #ffe5e5;
+    border-left: 6px solid #d00000;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.alert-high {
+    background-color: #fff0df;
+    border-left: 6px solid #ff7800;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.alert-medium {
+    background-color: #fff9d9;
+    border-left: 6px solid #e0b000;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.alert-low {
+    background-color: #e8f7ec;
+    border-left: 6px solid #2e8b57;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.small-text {
+    color: #777;
+    font-size: 13px;
 }
 
 </style>
@@ -80,20 +107,25 @@ st.markdown("""
 
 
 # =========================================================
-# KẾT NỐI MYSQL
+# KẾT NỐI AIVEN MYSQL
 # =========================================================
 
+@st.cache_resource
 def get_connection():
 
+    cfg = st.secrets["mysql"]
+
     connection = pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
+        host=cfg["host"],
+        port=int(cfg["port"]),
+        user=cfg["user"],
+        password=cfg["password"],
+        database=cfg["database"],
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=20,
+        connect_timeout=30,
+        read_timeout=30,
+        write_timeout=30,
         ssl={}
     )
 
@@ -101,134 +133,309 @@ def get_connection():
 
 
 # =========================================================
-# TẠO BẢNG
+# KIỂM TRA KẾT NỐI
+# =========================================================
+
+def test_connection():
+
+    try:
+
+        conn = get_connection()
+
+        with conn.cursor() as cursor:
+
+            cursor.execute("SELECT 1 AS test")
+            result = cursor.fetchone()
+
+        return result is not None
+
+    except Exception as e:
+
+        st.error("Không thể kết nối Aiven MySQL.")
+        st.code(str(e))
+
+        return False
+
+
+# =========================================================
+# TẠO DATABASE TABLE
 # =========================================================
 
 def init_database():
 
-    connection = None
+    conn = get_connection()
+
+    sql = """
+    CREATE TABLE IF NOT EXISTS complaints (
+
+        id INT AUTO_INCREMENT PRIMARY KEY,
+
+        complaint_code VARCHAR(30) UNIQUE NOT NULL,
+
+        customer_name VARCHAR(150) NOT NULL,
+
+        customer_email VARCHAR(150),
+
+        service_type VARCHAR(100) NOT NULL,
+
+        satisfaction INT NOT NULL,
+
+        feedback TEXT NOT NULL,
+
+        issue_type VARCHAR(100),
+
+        severity VARCHAR(30),
+
+        status VARCHAR(30) DEFAULT 'Chưa xử lý',
+
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP
+
+    )
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci
+    """
 
     try:
 
-        connection = get_connection()
-        cursor = connection.cursor()
+        with conn.cursor() as cursor:
 
-        sql = """
-        CREATE TABLE IF NOT EXISTS complaints (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            complaint_code VARCHAR(20) NOT NULL UNIQUE,
-            created_at DATETIME NOT NULL,
-            customer_name VARCHAR(150) NOT NULL,
-            email VARCHAR(150) NOT NULL,
-            service VARCHAR(100) NOT NULL,
-            satisfaction INT NOT NULL,
-            feedback_type VARCHAR(50),
-            issue_type VARCHAR(100),
-            alert_level VARCHAR(50),
-            content TEXT,
-            status VARCHAR(50) DEFAULT 'Chưa xử lý',
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        CHARACTER SET utf8mb4
-        COLLATE utf8mb4_unicode_ci
-        """
+            cursor.execute(sql)
 
-        cursor.execute(sql)
-
-        connection.commit()
-
-        cursor.close()
-        connection.close()
-
-        return True, ""
+        conn.commit()
 
     except Exception as e:
 
-        if connection:
-            connection.close()
-
-        return False, str(e)
+        conn.rollback()
+        raise e
 
 
 # =========================================================
-# TẠO MÃ PHẢN HỒI
+# MÃ PHẢN HỒI
 # =========================================================
 
 def generate_complaint_code():
 
-    connection = None
+    conn = get_connection()
 
     try:
 
-        connection = get_connection()
-        cursor = connection.cursor()
+        with conn.cursor() as cursor:
 
-        cursor.execute(
-            "SELECT COUNT(*) AS total FROM complaints"
-        )
+            cursor.execute(
+                "SELECT id FROM complaints ORDER BY id DESC LIMIT 1"
+            )
 
-        result = cursor.fetchone()
+            result = cursor.fetchone()
 
-        cursor.close()
-        connection.close()
+        if result:
 
-        number = int(result["total"]) + 1
+            next_id = result["id"] + 1
 
-        return f"CB{number:04d}"
+        else:
+
+            next_id = 1
+
+        return f"CR-{datetime.now().strftime('%Y%m%d')}-{next_id:04d}"
 
     except Exception:
 
-        if connection:
-            connection.close()
-
-        return "CB0001"
+        return f"CR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
 
 # =========================================================
-# LẤY DỮ LIỆU
+# PHÂN LOẠI VẤN ĐỀ
 # =========================================================
 
-def get_complaints():
+def classify_issue(feedback, service_type):
 
-    connection = None
+    text = (
+        str(feedback).lower()
+        + " "
+        + str(service_type).lower()
+    )
 
-    try:
+    categories = {
 
-        connection = get_connection()
+        "Chất lượng dịch vụ": [
+            "dịch vụ",
+            "phục vụ",
+            "phục vụ chậm",
+            "không chuyên nghiệp",
+            "thái độ",
+            "nhân viên",
+            "staff",
+            "service"
+        ],
 
-        sql = """
-        SELECT
-            id,
-            complaint_code AS `Mã phản hồi`,
-            created_at AS `Thời gian`,
-            customer_name AS `Họ tên`,
-            email AS `Email`,
-            service AS `Dịch vụ`,
-            satisfaction AS `Mức hài lòng`,
-            feedback_type AS `Loại phản hồi`,
-            issue_type AS `Loại vấn đề`,
-            alert_level AS `Mức cảnh báo`,
-            content AS `Nội dung`,
-            status AS `Trạng thái`,
-            updated_at AS `Cập nhật`
-        FROM complaints
-        ORDER BY created_at DESC
-        """
+        "Lịch trình / Tour": [
+            "tour",
+            "lịch trình",
+            "lịch",
+            "điểm đến",
+            "tham quan",
+            "hướng dẫn viên",
+            "hdv",
+            "guide",
+            "trễ giờ",
+            "thời gian"
+        ],
 
-        df = pd.read_sql(sql, connection)
+        "Khách sạn / Lưu trú": [
+            "khách sạn",
+            "phòng",
+            "phòng ngủ",
+            "resort",
+            "check in",
+            "check-in",
+            "check out",
+            "điều hòa",
+            "máy lạnh",
+            "vệ sinh phòng"
+        ],
 
-        connection.close()
+        "Vận chuyển": [
+            "xe",
+            "tài xế",
+            "bus",
+            "ô tô",
+            "phương tiện",
+            "đón",
+            "đưa",
+            "trễ chuyến",
+            "chuyến bay",
+            "máy bay"
+        ],
 
-        return df
+        "Ăn uống": [
+            "đồ ăn",
+            "món ăn",
+            "thức ăn",
+            "nhà hàng",
+            "bữa ăn",
+            "buffet",
+            "ăn uống",
+            "thực phẩm"
+        ],
 
-    except Exception as e:
+        "Chi phí / Thanh toán": [
+            "giá",
+            "chi phí",
+            "tiền",
+            "thanh toán",
+            "hóa đơn",
+            "phí",
+            "đắt",
+            "hoàn tiền",
+            "refund"
+        ],
 
-        if connection:
-            connection.close()
+        "Sự kiện / Teambuilding": [
+            "teambuilding",
+            "team building",
+            "sự kiện",
+            "event",
+            "mc",
+            "trò chơi",
+            "game",
+            "âm thanh",
+            "sân khấu",
+            "gala",
+            "chương trình"
+        ]
 
-        st.error(f"Lỗi MySQL: {e}")
+    }
 
-        return pd.DataFrame()
+    best_category = "Khác"
+    best_score = 0
+
+    for category, keywords in categories.items():
+
+        score = 0
+
+        for keyword in keywords:
+
+            if keyword in text:
+
+                score += 1
+
+        if score > best_score:
+
+            best_score = score
+            best_category = category
+
+    return best_category
+
+
+# =========================================================
+# XÁC ĐỊNH MỨC ĐỘ CẢNH BÁO
+# =========================================================
+
+def calculate_severity(satisfaction, feedback):
+
+    text = str(feedback).lower()
+
+    critical_keywords = [
+        "ngộ độc",
+        "tai nạn",
+        "bị thương",
+        "thương tích",
+        "mất an toàn",
+        "lừa đảo",
+        "gian lận",
+        "đe dọa",
+        "khẩn cấp",
+        "nguy hiểm"
+    ]
+
+    high_keywords = [
+        "rất tệ",
+        "quá tệ",
+        "thất vọng",
+        "không bao giờ",
+        "sẽ không quay lại",
+        "yêu cầu hoàn tiền",
+        "hoàn tiền",
+        "khiếu nại",
+        "bức xúc",
+        "tệ",
+        "phàn nàn"
+    ]
+
+    medium_keywords = [
+        "không hài lòng",
+        "chậm",
+        "thiếu",
+        "sai",
+        "không tốt",
+        "bất tiện",
+        "vấn đề",
+        "không ổn"
+    ]
+
+    if any(keyword in text for keyword in critical_keywords):
+
+        return "Khẩn cấp"
+
+    if satisfaction <= 2:
+
+        return "Cao"
+
+    if any(keyword in text for keyword in high_keywords):
+
+        return "Cao"
+
+    if satisfaction == 3:
+
+        return "Trung bình"
+
+    if any(keyword in text for keyword in medium_keywords):
+
+        return "Trung bình"
+
+    return "Thấp"
 
 
 # =========================================================
@@ -236,88 +443,124 @@ def get_complaints():
 # =========================================================
 
 def insert_complaint(
-    name,
-    email,
-    service,
+    customer_name,
+    customer_email,
+    service_type,
     satisfaction,
-    feedback_type,
-    issue,
-    alert,
-    content
+    feedback
 ):
 
-    connection = None
+    conn = get_connection()
+
+    complaint_code = generate_complaint_code()
+
+    issue_type = classify_issue(
+        feedback,
+        service_type
+    )
+
+    severity = calculate_severity(
+        satisfaction,
+        feedback
+    )
+
+    sql = """
+    INSERT INTO complaints
+    (
+        complaint_code,
+        customer_name,
+        customer_email,
+        service_type,
+        satisfaction,
+        feedback,
+        issue_type,
+        severity,
+        status
+    )
+    VALUES
+    (
+        %s,
+        %s,
+        %s,
+        %s,
+        %s,
+        %s,
+        %s,
+        %s,
+        'Chưa xử lý'
+    )
+    """
 
     try:
 
-        connection = get_connection()
-        cursor = connection.cursor()
+        with conn.cursor() as cursor:
 
-        code = generate_complaint_code()
-        now = datetime.now()
+            cursor.execute(
+                sql,
+                (
+                    complaint_code,
+                    customer_name,
+                    customer_email,
+                    service_type,
+                    satisfaction,
+                    feedback,
+                    issue_type,
+                    severity
+                )
+            )
 
-        sql = """
-        INSERT INTO complaints (
-            complaint_code,
-            created_at,
-            customer_name,
-            email,
-            service,
-            satisfaction,
-            feedback_type,
-            issue_type,
-            alert_level,
-            content,
-            status,
-            updated_at
-        )
-        VALUES (
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s
-        )
-        """
+        conn.commit()
 
-        values = (
-            code,
-            now,
-            name,
-            email,
-            service,
-            satisfaction,
-            feedback_type,
-            issue,
-            alert,
-            content,
-            "Chưa xử lý",
-            now
-        )
-
-        cursor.execute(sql, values)
-
-        connection.commit()
-
-        cursor.close()
-        connection.close()
-
-        return True, code
+        return complaint_code, issue_type, severity
 
     except Exception as e:
 
-        if connection:
-            connection.rollback()
-            connection.close()
+        conn.rollback()
 
-        return False, str(e)
+        raise e
+
+
+# =========================================================
+# LẤY TOÀN BỘ DỮ LIỆU
+# =========================================================
+
+def get_complaints():
+
+    conn = get_connection()
+
+    sql = """
+    SELECT
+        id,
+        complaint_code,
+        customer_name,
+        customer_email,
+        service_type,
+        satisfaction,
+        feedback,
+        issue_type,
+        severity,
+        status,
+        created_at,
+        updated_at
+    FROM complaints
+    ORDER BY created_at DESC
+    """
+
+    try:
+
+        with conn.cursor() as cursor:
+
+            cursor.execute(sql)
+
+            data = cursor.fetchall()
+
+        return pd.DataFrame(data)
+
+    except Exception as e:
+
+        st.error(f"Lỗi lấy dữ liệu: {e}")
+
+        return pd.DataFrame()
 
 
 # =========================================================
@@ -326,42 +569,32 @@ def insert_complaint(
 
 def update_status(complaint_id, new_status):
 
-    connection = None
+    conn = get_connection()
+
+    sql = """
+    UPDATE complaints
+    SET
+        status = %s,
+        updated_at = NOW()
+    WHERE id = %s
+    """
 
     try:
 
-        connection = get_connection()
-        cursor = connection.cursor()
+        with conn.cursor() as cursor:
 
-        sql = """
-        UPDATE complaints
-        SET
-            status = %s,
-            updated_at = %s
-        WHERE id = %s
-        """
-
-        cursor.execute(
-            sql,
-            (
-                new_status,
-                datetime.now(),
-                complaint_id
+            cursor.execute(
+                sql,
+                (new_status, complaint_id)
             )
-        )
 
-        connection.commit()
-
-        cursor.close()
-        connection.close()
+        conn.commit()
 
         return True
 
     except Exception as e:
 
-        if connection:
-            connection.rollback()
-            connection.close()
+        conn.rollback()
 
         st.error(f"Lỗi cập nhật: {e}")
 
@@ -369,139 +602,20 @@ def update_status(complaint_id, new_status):
 
 
 # =========================================================
-# PHÂN LOẠI VẤN ĐỀ
-# =========================================================
-
-def classify_issue(text):
-
-    text = text.lower()
-
-    categories = {
-
-        "Phòng nghỉ": [
-            "phòng",
-            "vệ sinh",
-            "giường",
-            "máy lạnh",
-            "điều hòa",
-            "toilet",
-            "nhà vệ sinh",
-            "khách sạn"
-        ],
-
-        "Nhân viên": [
-            "nhân viên",
-            "phục vụ",
-            "thái độ",
-            "ứng xử",
-            "hướng dẫn viên",
-            "hdv"
-        ],
-
-        "Lịch trình": [
-            "lịch trình",
-            "thời gian",
-            "trễ",
-            "chậm",
-            "điểm tham quan"
-        ],
-
-        "Vận chuyển": [
-            "xe",
-            "tài xế",
-            "đưa đón",
-            "xe bus",
-            "ô tô",
-            "máy bay"
-        ],
-
-        "Ẩm thực": [
-            "đồ ăn",
-            "thức ăn",
-            "món ăn",
-            "nhà hàng",
-            "bữa ăn",
-            "buffet"
-        ],
-
-        "Thanh toán": [
-            "thanh toán",
-            "giá",
-            "chi phí",
-            "tiền",
-            "hóa đơn",
-            "phí"
-        ]
-    }
-
-    for category, keywords in categories.items():
-
-        for keyword in keywords:
-
-            if keyword in text:
-                return category
-
-    return "Khác"
-
-
-# =========================================================
-# XÁC ĐỊNH MỨC CẢNH BÁO
-# =========================================================
-
-def calculate_alert(text, satisfaction):
-
-    text = text.lower()
-
-    critical_words = [
-        "nguy hiểm",
-        "tai nạn",
-        "mất đồ",
-        "bị mất",
-        "ngộ độc",
-        "thương tích",
-        "đe dọa",
-        "không an toàn"
-    ]
-
-    high_words = [
-        "rất tệ",
-        "không hài lòng",
-        "quá tệ",
-        "trễ hơn",
-        "chậm hơn",
-        "bẩn",
-        "hỏng",
-        "sai",
-        "kém"
-    ]
-
-    for word in critical_words:
-
-        if word in text:
-            return "Khẩn cấp"
-
-    if satisfaction <= 1:
-        return "Khẩn cấp"
-
-    for word in high_words:
-
-        if word in text:
-            return "Cao"
-
-    if satisfaction == 2:
-        return "Cao"
-
-    if satisfaction == 3:
-        return "Trung bình"
-
-    return "Thấp"
-
-
-# =========================================================
 # KHỞI TẠO DATABASE
 # =========================================================
 
-db_ok, db_error = init_database()
+try:
+
+    init_database()
+
+except Exception as e:
+
+    st.error("❌ Không thể khởi tạo cơ sở dữ liệu Aiven MySQL.")
+
+    st.code(str(e))
+
+    st.stop()
 
 
 # =========================================================
@@ -511,15 +625,20 @@ db_ok, db_error = init_database()
 with st.sidebar:
 
     try:
+
         st.image(
             "VT3.jpg",
             use_container_width=True
         )
-    except:
-        st.warning("Không tìm thấy VT3.jpg")
+
+    except Exception:
+
+        st.markdown("## 🚨 CUSTOMER COMPLAINT RADAR")
+
+    st.markdown("---")
 
     st.markdown(
-        "## 🚨 Customer Complaint Radar"
+        "### 🚨 CUSTOMER COMPLAINT RADAR"
     )
 
     st.caption(
@@ -527,198 +646,194 @@ with st.sidebar:
         "vấn đề chất lượng dịch vụ từ phản hồi khách hàng."
     )
 
-    st.divider()
+    st.markdown("---")
 
-    page = st.radio(
+    menu = st.radio(
         "MENU",
         [
             "🏠 Tổng quan",
             "📝 Gửi phản hồi",
             "🔎 Tra cứu phản hồi",
             "🚨 Cảnh báo chất lượng",
-            "📊 Phân tích dữ liệu"
+            "📊 Phân tích dữ liệu",
+            "⚙️ Kiểm tra hệ thống"
         ]
     )
 
-    st.divider()
+    st.markdown("---")
 
-    if db_ok:
-        st.success("🟢 MySQL đang kết nối")
-    else:
-        st.error("🔴 MySQL chưa kết nối")
+    st.caption(
+        "TADIVIVU TRAVEL\n\n"
+        "Customer Service Intelligence"
+    )
 
 
 # =========================================================
 # HEADER
 # =========================================================
 
-st.markdown("""
-<div class="header-box">
+st.markdown(
+    '<div class="main-title">🚨 CUSTOMER COMPLAINT RADAR</div>',
+    unsafe_allow_html=True
+)
 
-    <div class="header-title">
-        🚨 CUSTOMER COMPLAINT RADAR
-    </div>
-
-    <div class="header-subtitle">
-        Xây dựng hệ thống phân tích và cảnh báo
-        vấn đề chất lượng dịch vụ từ phản hồi khách hàng
-    </div>
-
-</div>
-""", unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitle">'
+    'Xây dựng hệ thống phân tích và cảnh báo vấn đề chất lượng dịch vụ từ phản hồi khách hàng'
+    '</div>',
+    unsafe_allow_html=True
+)
 
 
 # =========================================================
-# KIỂM TRA MYSQL
+# LOAD DATA
 # =========================================================
 
-if not db_ok:
-
-    st.error(
-        "Không thể kết nối đến MySQL Aiven."
-    )
-
-    st.code(db_error)
-
-    st.stop()
+df = get_complaints()
 
 
 # =========================================================
-# TỔNG QUAN
+# TRANG TỔNG QUAN
 # =========================================================
 
-if page == "🏠 Tổng quan":
+if menu == "🏠 Tổng quan":
 
-    df = get_complaints()
+    st.subheader("📌 Tổng quan chất lượng dịch vụ")
 
-    st.subheader("📊 Tổng quan chất lượng dịch vụ")
+    if df.empty:
 
-    total = len(df)
-
-    critical = len(
-        df[df["Mức cảnh báo"] == "Khẩn cấp"]
-    )
-
-    high = len(
-        df[df["Mức cảnh báo"] == "Cao"]
-    )
-
-    unresolved = len(
-        df[df["Trạng thái"] != "Đã xử lý"]
-    )
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-number">{total}</div>
-                <div class="metric-label">
-                    Tổng phản hồi
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
+        st.info(
+            "Chưa có dữ liệu phản hồi khách hàng. "
+            "Hãy vào mục **Gửi phản hồi** để tạo dữ liệu."
         )
 
-    with col2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-number">{critical}</div>
-                <div class="metric-label">
-                    Khẩn cấp
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
+    else:
+
+        total = len(df)
+
+        unresolved = len(
+            df[df["status"] == "Chưa xử lý"]
         )
 
-    with col3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-number">{high}</div>
-                <div class="metric-label">
-                    Mức cao
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
+        high_alert = len(
+            df[
+                df["severity"].isin(
+                    ["Cao", "Khẩn cấp"]
+                )
+            ]
         )
 
-    with col4:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-number">{unresolved}</div>
-                <div class="metric-label">
-                    Chưa xử lý
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True
+        average_rating = round(
+            df["satisfaction"].mean(),
+            2
         )
 
-    st.markdown("### 📈 Phân tích")
+        col1, col2, col3, col4 = st.columns(4)
 
-    if len(df) > 0:
+        with col1:
+
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-number">{total}</div>
+                    <div class="metric-label">Tổng phản hồi</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        with col2:
+
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-number">{unresolved}</div>
+                    <div class="metric-label">Chưa xử lý</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        with col3:
+
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-number">{high_alert}</div>
+                    <div class="metric-label">Cảnh báo cao</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        with col4:
+
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-number">{average_rating}/5</div>
+                    <div class="metric-label">Điểm hài lòng TB</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        st.markdown("---")
 
         col1, col2 = st.columns(2)
 
         with col1:
 
-            st.markdown("#### 📌 Vấn đề thường gặp")
+            st.subheader("📊 Phân bố mức độ cảnh báo")
 
-            issue_count = df[
-                "Loại vấn đề"
-            ].value_counts()
+            severity_count = (
+                df["severity"]
+                .value_counts()
+                .reindex(
+                    [
+                        "Khẩn cấp",
+                        "Cao",
+                        "Trung bình",
+                        "Thấp"
+                    ],
+                    fill_value=0
+                )
+            )
 
-            st.bar_chart(issue_count)
+            st.bar_chart(severity_count)
 
         with col2:
 
-            st.markdown("#### 🚨 Mức cảnh báo")
+            st.subheader("📂 Nhóm vấn đề")
 
-            alert_count = df[
-                "Mức cảnh báo"
-            ].value_counts()
+            issue_count = (
+                df["issue_type"]
+                .value_counts()
+            )
 
-            st.bar_chart(alert_count)
+            st.bar_chart(issue_count)
 
-    st.markdown(
-        "### 🚨 Phản hồi cần ưu tiên"
-    )
+        st.markdown("---")
 
-    warning_df = df[
-        df["Mức cảnh báo"].isin(
-            ["Khẩn cấp", "Cao"]
-        )
-    ]
+        st.subheader("🕐 Phản hồi gần đây")
 
-    if len(warning_df) > 0:
+        recent = df.head(10).copy()
+
+        display_columns = [
+            "complaint_code",
+            "customer_name",
+            "service_type",
+            "satisfaction",
+            "issue_type",
+            "severity",
+            "status",
+            "created_at"
+        ]
 
         st.dataframe(
-            warning_df[
-                [
-                    "Mã phản hồi",
-                    "Thời gian",
-                    "Họ tên",
-                    "Dịch vụ",
-                    "Loại vấn đề",
-                    "Mức cảnh báo",
-                    "Trạng thái"
-                ]
-            ],
+            recent[display_columns],
             use_container_width=True,
             hide_index=True
-        )
-
-    else:
-
-        st.success(
-            "✅ Hiện chưa có phản hồi mức cao."
         )
 
 
@@ -726,342 +841,395 @@ if page == "🏠 Tổng quan":
 # GỬI PHẢN HỒI
 # =========================================================
 
-elif page == "📝 Gửi phản hồi":
+elif menu == "📝 Gửi phản hồi":
 
-    st.subheader(
-        "📝 Gửi phản hồi / khiếu nại"
-    )
+    st.subheader("📝 Gửi phản hồi khách hàng")
 
     st.info(
-        "Phản hồi sẽ được hệ thống phân tích "
-        "và lưu trực tiếp vào MySQL."
+        "Thông tin phản hồi sẽ được hệ thống tự động "
+        "phân loại vấn đề và xác định mức độ cảnh báo."
     )
 
-    with st.form("feedback_form"):
+    with st.form("feedback_form", clear_on_submit=True):
 
         col1, col2 = st.columns(2)
 
         with col1:
 
-            name = st.text_input(
-                "Họ và tên *"
-            )
-
-            email = st.text_input(
-                "Email *"
-            )
-
-            service = st.selectbox(
-                "Dịch vụ đã sử dụng *",
-                [
-                    "Tour du lịch",
-                    "Khách sạn",
-                    "Nhà hàng",
-                    "Vận chuyển",
-                    "Teambuilding",
-                    "Sự kiện",
-                    "Khác"
-                ]
+            customer_name = st.text_input(
+                "Họ và tên *",
+                placeholder="Nhập họ tên khách hàng"
             )
 
         with col2:
 
-            satisfaction = st.slider(
-                "Mức độ hài lòng",
-                1,
-                5,
-                3
+            customer_email = st.text_input(
+                "Email",
+                placeholder="example@email.com"
             )
 
-            st.write(
-                f"⭐ Đánh giá: **{satisfaction}/5**"
-            )
-
-            feedback_type = st.selectbox(
-                "Loại phản hồi",
-                [
-                    "Khiếu nại",
-                    "Góp ý",
-                    "Khen ngợi",
-                    "Đề xuất"
-                ]
-            )
-
-        content = st.text_area(
-            "Nội dung phản hồi *",
-            height=180,
-            placeholder=(
-                "Hãy mô tả trải nghiệm "
-                "hoặc vấn đề bạn gặp phải..."
-            )
+        service_type = st.selectbox(
+            "Loại dịch vụ *",
+            [
+                "Tour du lịch",
+                "Teambuilding",
+                "Sự kiện",
+                "Khách sạn / Resort",
+                "Vận chuyển",
+                "Vé máy bay",
+                "Visa",
+                "Dịch vụ khác"
+            ]
         )
 
-        submit = st.form_submit_button(
-            "📤 Gửi phản hồi",
+        satisfaction = st.slider(
+            "Mức độ hài lòng",
+            min_value=1,
+            max_value=5,
+            value=5,
+            help="1 = Rất không hài lòng, 5 = Rất hài lòng"
+        )
+
+        satisfaction_text = {
+            1: "😡 Rất không hài lòng",
+            2: "😞 Không hài lòng",
+            3: "😐 Bình thường",
+            4: "🙂 Hài lòng",
+            5: "😄 Rất hài lòng"
+        }
+
+        st.write(
+            f"Đánh giá: **{satisfaction_text[satisfaction]}**"
+        )
+
+        feedback = st.text_area(
+            "Nội dung phản hồi *",
+            placeholder=(
+                "Ví dụ: Nhân viên phục vụ chậm, "
+                "lịch trình tour bị trễ..."
+            ),
+            height=180
+        )
+
+        submitted = st.form_submit_button(
+            "🚀 GỬI PHẢN HỒI",
             use_container_width=True
         )
 
-    if submit:
+    if submitted:
 
-        if (
-            not name.strip()
-            or not email.strip()
-            or not content.strip()
+        if not customer_name.strip():
+
+            st.error("Vui lòng nhập họ tên khách hàng.")
+
+        elif not feedback.strip():
+
+            st.error("Vui lòng nhập nội dung phản hồi.")
+
+        elif customer_email and not re.match(
+            r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+            customer_email
         ):
 
-            st.error(
-                "Vui lòng nhập đầy đủ thông tin."
+            st.error("Email không hợp lệ.")
+
+        else:
+
+            try:
+
+                code, issue, severity = insert_complaint(
+                    customer_name.strip(),
+                    customer_email.strip(),
+                    service_type,
+                    satisfaction,
+                    feedback.strip()
+                )
+
+                st.success(
+                    f"Đã ghi nhận phản hồi thành công! "
+                    f"Mã phản hồi: **{code}**"
+                )
+
+                st.markdown("### 🤖 Kết quả phân tích tự động")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    st.info(
+                        f"📂 Nhóm vấn đề: **{issue}**"
+                    )
+
+                with col2:
+
+                    if severity == "Khẩn cấp":
+
+                        st.error(
+                            f"🚨 Mức cảnh báo: **{severity}**"
+                        )
+
+                    elif severity == "Cao":
+
+                        st.warning(
+                            f"⚠️ Mức cảnh báo: **{severity}**"
+                        )
+
+                    elif severity == "Trung bình":
+
+                        st.warning(
+                            f"🟡 Mức cảnh báo: **{severity}**"
+                        )
+
+                    else:
+
+                        st.success(
+                            f"🟢 Mức cảnh báo: **{severity}**"
+                        )
+
+            except Exception as e:
+
+                st.error(
+                    "Không thể lưu phản hồi vào cơ sở dữ liệu."
+                )
+
+                st.code(str(e))
+
+
+# =========================================================
+# TRA CỨU PHẢN HỒI
+# =========================================================
+
+elif menu == "🔎 Tra cứu phản hồi":
+
+    st.subheader("🔎 Tra cứu phản hồi khách hàng")
+
+    if df.empty:
+
+        st.info("Chưa có dữ liệu.")
+
+    else:
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            search = st.text_input(
+                "🔍 Tìm kiếm",
+                placeholder="Tên, mã phản hồi, nội dung..."
+            )
+
+        with col2:
+
+            severity_filter = st.selectbox(
+                "Mức cảnh báo",
+                [
+                    "Tất cả",
+                    "Khẩn cấp",
+                    "Cao",
+                    "Trung bình",
+                    "Thấp"
+                ]
+            )
+
+        with col3:
+
+            status_filter = st.selectbox(
+                "Trạng thái",
+                [
+                    "Tất cả",
+                    "Chưa xử lý",
+                    "Đang xử lý",
+                    "Đã xử lý"
+                ]
+            )
+
+        filtered = df.copy()
+
+        if search:
+
+            search = search.lower()
+
+            mask = (
+                filtered.astype(str)
+                .apply(
+                    lambda row:
+                    row.str.lower().str.contains(
+                        search,
+                        na=False
+                    ).any(),
+                    axis=1
+                )
+            )
+
+            filtered = filtered[mask]
+
+        if severity_filter != "Tất cả":
+
+            filtered = filtered[
+                filtered["severity"] == severity_filter
+            ]
+
+        if status_filter != "Tất cả":
+
+            filtered = filtered[
+                filtered["status"] == status_filter
+            ]
+
+        st.write(
+            f"**Tìm thấy {len(filtered)} phản hồi**"
+        )
+
+        if filtered.empty:
+
+            st.warning("Không tìm thấy dữ liệu phù hợp.")
+
+        else:
+
+            st.dataframe(
+                filtered[
+                    [
+                        "complaint_code",
+                        "customer_name",
+                        "customer_email",
+                        "service_type",
+                        "satisfaction",
+                        "feedback",
+                        "issue_type",
+                        "severity",
+                        "status",
+                        "created_at"
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True
+            )
+
+
+# =========================================================
+# CẢNH BÁO CHẤT LƯỢNG
+# =========================================================
+
+elif menu == "🚨 Cảnh báo chất lượng":
+
+    st.subheader("🚨 Trung tâm cảnh báo chất lượng")
+
+    if df.empty:
+
+        st.success(
+            "Hiện chưa có phản hồi nào cần cảnh báo."
+        )
+
+    else:
+
+        alerts = df[
+            df["severity"].isin(
+                ["Khẩn cấp", "Cao", "Trung bình"]
+            )
+        ].copy()
+
+        if alerts.empty:
+
+            st.success(
+                "🎉 Hiện không có cảnh báo chất lượng."
             )
 
         else:
 
-            issue = classify_issue(content)
-
-            alert = calculate_alert(
-                content,
-                satisfaction
+            st.write(
+                f"Có **{len(alerts)}** phản hồi cần theo dõi."
             )
 
-            success, result = insert_complaint(
-                name,
-                email,
-                service,
-                satisfaction,
-                feedback_type,
-                issue,
-                alert,
-                content
-            )
+            for _, row in alerts.iterrows():
 
-            if success:
+                severity = row["severity"]
 
-                st.success(
-                    f"✅ Gửi phản hồi thành công! "
-                    f"Mã phản hồi: **{result}**"
+                if severity == "Khẩn cấp":
+
+                    css_class = "alert-critical"
+                    icon = "🚨"
+
+                elif severity == "Cao":
+
+                    css_class = "alert-high"
+                    icon = "🔴"
+
+                else:
+
+                    css_class = "alert-medium"
+                    icon = "🟡"
+
+                st.markdown(
+                    f"""
+                    <div class="{css_class}">
+                        <strong>{icon} {severity}</strong><br>
+                        <b>Mã:</b> {row["complaint_code"]}<br>
+                        <b>Khách hàng:</b> {row["customer_name"]}<br>
+                        <b>Dịch vụ:</b> {row["service_type"]}<br>
+                        <b>Vấn đề:</b> {row["issue_type"]}<br>
+                        <b>Mức hài lòng:</b> {row["satisfaction"]}/5<br>
+                        <b>Nội dung:</b> {row["feedback"]}<br>
+                        <b>Trạng thái:</b> {row["status"]}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
                 )
 
-                st.write(
-                    f"**Loại vấn đề:** {issue}"
-                )
+                col1, col2 = st.columns([3, 1])
 
-                st.write(
-                    f"**Mức cảnh báo:** {alert}"
-                )
+                with col1:
 
-                if alert == "Khẩn cấp":
-
-                    st.error(
-                        "🚨 CẢNH BÁO KHẨN CẤP: "
-                        "Vấn đề cần được ưu tiên xử lý."
+                    new_status = st.selectbox(
+                        "Cập nhật trạng thái",
+                        [
+                            "Chưa xử lý",
+                            "Đang xử lý",
+                            "Đã xử lý"
+                        ],
+                        index=[
+                            "Chưa xử lý",
+                            "Đang xử lý",
+                            "Đã xử lý"
+                        ].index(row["status"])
+                        if row["status"]
+                        in [
+                            "Chưa xử lý",
+                            "Đang xử lý",
+                            "Đã xử lý"
+                        ]
+                        else 0,
+                        key=f"status_{row['id']}"
                     )
 
-                elif alert == "Cao":
+                with col2:
 
-                    st.warning(
-                        "⚠️ CẢNH BÁO MỨC CAO: "
-                        "Doanh nghiệp cần kiểm tra sớm."
-                    )
+                    if st.button(
+                        "💾 Cập nhật",
+                        key=f"update_{row['id']}"
+                    ):
 
-            else:
+                        if update_status(
+                            row["id"],
+                            new_status
+                        ):
 
-                st.error(
-                    f"Không thể lưu phản hồi: {result}"
-                )
+                            st.success(
+                                "Đã cập nhật trạng thái."
+                            )
 
+                            st.rerun()
 
-# =========================================================
-# TRA CỨU
-# =========================================================
-
-elif page == "🔎 Tra cứu phản hồi":
-
-    st.subheader("🔎 Tra cứu phản hồi")
-
-    df = get_complaints()
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        search = st.text_input(
-            "Tìm kiếm",
-            placeholder="Mã, họ tên hoặc nội dung..."
-        )
-
-    with col2:
-
-        services = ["Tất cả"]
-
-        if len(df) > 0:
-            services += sorted(
-                df["Dịch vụ"]
-                .dropna()
-                .unique()
-                .tolist()
-            )
-
-        service_filter = st.selectbox(
-            "Dịch vụ",
-            services
-        )
-
-    with col3:
-
-        statuses = ["Tất cả"]
-
-        if len(df) > 0:
-            statuses += sorted(
-                df["Trạng thái"]
-                .dropna()
-                .unique()
-                .tolist()
-            )
-
-        status_filter = st.selectbox(
-            "Trạng thái",
-            statuses
-        )
-
-    result = df.copy()
-
-    if search:
-
-        search_lower = search.lower()
-
-        result = result[
-            result.apply(
-                lambda row:
-                search_lower in
-                str(row.to_dict()).lower(),
-                axis=1
-            )
-        ]
-
-    if service_filter != "Tất cả":
-
-        result = result[
-            result["Dịch vụ"] == service_filter
-        ]
-
-    if status_filter != "Tất cả":
-
-        result = result[
-            result["Trạng thái"] == status_filter
-        ]
-
-    st.write(
-        f"**Tìm thấy {len(result)} phản hồi**"
-    )
-
-    st.dataframe(
-        result[
-            [
-                "Mã phản hồi",
-                "Thời gian",
-                "Họ tên",
-                "Dịch vụ",
-                "Mức hài lòng",
-                "Loại vấn đề",
-                "Mức cảnh báo",
-                "Trạng thái"
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# =========================================================
-# CẢNH BÁO
-# =========================================================
-
-elif page == "🚨 Cảnh báo chất lượng":
-
-    st.subheader(
-        "🚨 Trung tâm cảnh báo chất lượng"
-    )
-
-    df = get_complaints()
-
-    critical_df = df[
-        df["Mức cảnh báo"] == "Khẩn cấp"
-    ]
-
-    high_df = df[
-        df["Mức cảnh báo"] == "Cao"
-    ]
-
-    if len(critical_df) > 0:
-
-        st.error(
-            f"🚨 Có {len(critical_df)} "
-            "phản hồi KHẨN CẤP"
-        )
-
-        for _, row in critical_df.iterrows():
-
-            st.error(
-                f"""
-                🚨 {row['Mã phản hồi']}
-
-                Khách hàng: {row['Họ tên']}
-
-                Dịch vụ: {row['Dịch vụ']}
-
-                Vấn đề: {row['Loại vấn đề']}
-
-                Nội dung: {row['Nội dung']}
-
-                Trạng thái: {row['Trạng thái']}
-                """
-            )
-
-    if len(high_df) > 0:
-
-        st.warning(
-            f"⚠️ Có {len(high_df)} "
-            "phản hồi mức CAO"
-        )
-
-        st.dataframe(
-            high_df[
-                [
-                    "Mã phản hồi",
-                    "Họ tên",
-                    "Dịch vụ",
-                    "Loại vấn đề",
-                    "Mức hài lòng",
-                    "Trạng thái"
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    if (
-        len(critical_df) == 0
-        and len(high_df) == 0
-    ):
-
-        st.success(
-            "✅ Hiện chưa phát hiện "
-            "phản hồi mức cao."
-        )
+                st.markdown("---")
 
 
 # =========================================================
 # PHÂN TÍCH DỮ LIỆU
 # =========================================================
 
-elif page == "📊 Phân tích dữ liệu":
+elif menu == "📊 Phân tích dữ liệu":
 
-    st.subheader(
-        "📊 Phân tích chất lượng dịch vụ"
-    )
+    st.subheader("📊 Phân tích chất lượng dịch vụ")
 
-    df = get_complaints()
-
-    if len(df) == 0:
+    if df.empty:
 
         st.info(
             "Chưa có dữ liệu để phân tích."
@@ -1073,135 +1241,229 @@ elif page == "📊 Phân tích dữ liệu":
 
         with col1:
 
-            st.markdown(
-                "### ⭐ Mức độ hài lòng"
-            )
+            st.markdown("### ⭐ Mức độ hài lòng")
 
-            satisfaction = (
-                df["Mức hài lòng"]
+            rating = (
+                df["satisfaction"]
                 .value_counts()
                 .sort_index()
             )
 
-            st.bar_chart(satisfaction)
+            st.bar_chart(rating)
 
         with col2:
 
-            st.markdown(
-                "### 📌 Vấn đề thường gặp"
-            )
+            st.markdown("### 🚨 Mức độ cảnh báo")
 
-            issues = (
-                df["Loại vấn đề"]
+            severity = (
+                df["severity"]
                 .value_counts()
             )
 
-            st.bar_chart(issues)
+            st.bar_chart(severity)
 
-        st.markdown(
-            "### 🏨 Phân tích theo dịch vụ"
+        st.markdown("---")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.markdown("### 📂 Vấn đề thường gặp")
+
+            issue = (
+                df["issue_type"]
+                .value_counts()
+                .head(10)
+            )
+
+            st.bar_chart(issue)
+
+        with col2:
+
+            st.markdown("### 🏨 Phản hồi theo dịch vụ")
+
+            service = (
+                df["service_type"]
+                .value_counts()
+            )
+
+            st.bar_chart(service)
+
+        st.markdown("---")
+
+        st.subheader("📈 Chỉ số chất lượng")
+
+        total = len(df)
+
+        satisfied = len(
+            df[
+                df["satisfaction"] >= 4
+            ]
         )
 
-        service_analysis = (
-            df.groupby("Dịch vụ")
-            .agg(
-                Số_phản_hồi=(
-                    "Mã phản hồi",
-                    "count"
-                ),
-                Điểm_hài_lòng=(
-                    "Mức hài lòng",
-                    "mean"
+        high_alert = len(
+            df[
+                df["severity"].isin(
+                    ["Cao", "Khẩn cấp"]
                 )
-            )
-            .reset_index()
+            ]
         )
 
-        service_analysis[
-            "Điểm_hài_lòng"
-        ] = service_analysis[
-            "Điểm_hài_lòng"
-        ].round(2)
-
-        st.dataframe(
-            service_analysis,
-            use_container_width=True,
-            hide_index=True
+        satisfaction_rate = (
+            satisfied / total * 100
+            if total > 0
+            else 0
         )
 
-        st.markdown(
-            "### 🔄 Cập nhật trạng thái"
+        alert_rate = (
+            high_alert / total * 100
+            if total > 0
+            else 0
         )
 
-        codes = df[
-            "Mã phản hồi"
-        ].tolist()
+        col1, col2, col3 = st.columns(3)
 
-        selected_code = st.selectbox(
-            "Chọn phản hồi",
-            codes
-        )
+        with col1:
 
-        selected = df[
-            df["Mã phản hồi"] == selected_code
-        ].iloc[0]
-
-        status_options = [
-            "Chưa xử lý",
-            "Đã tiếp nhận",
-            "Đang xử lý",
-            "Đã xử lý",
-            "Đã đóng"
-        ]
-
-        current_status = selected["Trạng thái"]
-
-        if current_status in status_options:
-
-            default_index = status_options.index(
-                current_status
+            st.metric(
+                "Tỷ lệ khách hài lòng",
+                f"{satisfaction_rate:.1f}%"
             )
 
-        else:
+        with col2:
 
-            default_index = 0
-
-        new_status = st.selectbox(
-            "Trạng thái mới",
-            status_options,
-            index=default_index
-        )
-
-        if st.button(
-            "💾 Cập nhật trạng thái",
-            use_container_width=True
-        ):
-
-            success = update_status(
-                int(selected["id"]),
-                new_status
+            st.metric(
+                "Tỷ lệ cảnh báo cao",
+                f"{alert_rate:.1f}%"
             )
 
-            if success:
+        with col3:
 
-                st.success(
-                    "✅ Đã cập nhật trạng thái vào MySQL."
-                )
+            st.metric(
+                "Điểm hài lòng trung bình",
+                f"{df['satisfaction'].mean():.2f}/5"
+            )
 
-                st.rerun()
+        st.markdown("---")
 
-        st.markdown(
-            "### 📥 Xuất dữ liệu"
-        )
+        st.subheader("📥 Xuất dữ liệu")
 
         csv = df.to_csv(
-            index=False
-        ).encode("utf-8-sig")
+            index=False,
+            encoding="utf-8-sig"
+        )
 
         st.download_button(
-            "📥 Tải dữ liệu CSV",
-            csv,
-            "customer_complaints.csv",
-            "text/csv",
+            label="⬇️ Tải dữ liệu CSV",
+            data=csv,
+            file_name=(
+                f"customer_complaints_"
+                f"{datetime.now().strftime('%Y%m%d')}.csv"
+            ),
+            mime="text/csv",
             use_container_width=True
         )
+
+
+# =========================================================
+# KIỂM TRA HỆ THỐNG
+# =========================================================
+
+elif menu == "⚙️ Kiểm tra hệ thống":
+
+    st.subheader("⚙️ Kiểm tra hệ thống")
+
+    st.markdown(
+        """
+        <div class="card">
+            <h3>🔌 Aiven MySQL</h3>
+            <p>
+            Kiểm tra kết nối giữa Streamlit và cơ sở dữ liệu Aiven.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if st.button(
+        "🔄 KIỂM TRA KẾT NỐI",
+        use_container_width=True
+    ):
+
+        try:
+
+            if test_connection():
+
+                st.success(
+                    "✅ Kết nối Aiven MySQL thành công!"
+                )
+
+                st.write(
+                    "Database: **defaultdb**"
+                )
+
+                st.write(
+                    f"Số phản hồi hiện tại: **{len(df)}**"
+                )
+
+        except Exception as e:
+
+            st.error(
+                "❌ Kết nối thất bại."
+            )
+
+            st.code(str(e))
+
+    st.markdown("---")
+
+    st.subheader("🗄️ Thông tin cơ sở dữ liệu")
+
+    try:
+
+        cfg = st.secrets["mysql"]
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.write(
+                f"**Host:** `{cfg['host']}`"
+            )
+
+            st.write(
+                f"**Port:** `{cfg['port']}`"
+            )
+
+        with col2:
+
+            st.write(
+                f"**User:** `{cfg['user']}`"
+            )
+
+            st.write(
+                f"**Database:** `{cfg['database']}`"
+            )
+
+        st.success(
+            "🔐 Password đang được lấy từ Streamlit Secrets."
+        )
+
+    except Exception as e:
+
+        st.error(
+            "Không tìm thấy cấu hình Streamlit Secrets."
+        )
+
+        st.code(str(e))
+
+
+# =========================================================
+# FOOTER
+# =========================================================
+
+st.markdown("---")
+
+st.caption(
+    "CUSTOMER COMPLAINT RADAR © 2026 | "
+    "Hệ thống hỗ trợ phân tích và cảnh báo chất lượng dịch vụ"
+)
