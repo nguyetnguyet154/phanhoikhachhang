@@ -1,1 +1,5 @@
+```txt
 streamlit
+pandas
+pymysql
+```
